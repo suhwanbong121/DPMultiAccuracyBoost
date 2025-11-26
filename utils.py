@@ -91,3 +91,82 @@ def get_image_paths_and_labels(dataset):
         image_paths_flat += dataset[i].image_paths
         labels_flat += [i] * len(dataset[i].image_paths)
     return image_paths_flat, labels_flat
+
+class DPLinearAuditor(object):
+    """
+    Simple DP-SGD linear regression auditor for multiaccuracy.
+    h(x) = w^T x
+    """
+
+    def __init__(self,
+                 feature_dim,
+                 learning_rate=0.1,
+                 num_steps=200,
+                 batch_size=128,
+                 clipping_norm=1.0,
+                 noise_multiplier=1.0,
+                 seed=42):
+        self.d = feature_dim
+        self.lr = learning_rate
+        self.num_steps = num_steps
+        self.batch_size = batch_size
+        self.C = clipping_norm          # gradient clipping norm
+        self.noise_multiplier = noise_multiplier
+        self.rng = np.random.RandomState(seed)
+        # initialize weights
+        self.w = np.zeros(self.d, dtype=np.float32)
+
+    def _clip_gradients(self, grads):
+        """
+        grads: array of shape (batch_size, d)
+        Clip each per-example gradient to L2 norm <= C.
+        """
+        norms = np.linalg.norm(grads, axis=1, keepdims=True) + 1e-12
+        scale = np.minimum(1.0, self.C / norms)
+        return grads * scale
+
+    def fit(self, X, r):
+        """
+        X: shape (n, d)  – features (e.g., embeddings)
+        r: shape (n,)    – residuals f_t(x) - y
+        We minimize 0.5 * (h(x) - r)^2 with DP-SGD.
+        """
+        n, d = X.shape
+        assert d == self.d
+
+        indices = np.arange(n)
+        for step in range(self.num_steps):
+            self.rng.shuffle(indices)
+            # one minibatch per step (you can also loop over multiple)
+            batch_idx = indices[:self.batch_size]
+            Xb = X[batch_idx]          # (B, d)
+            rb = r[batch_idx]          # (B,)
+
+            # forward
+            preds = Xb.dot(self.w)     # (B,)
+            # grad wrt w for each example: (pred - r) * x
+            # shape: (B, d)
+            per_example_grads = ((preds - rb)[:, None] * Xb)
+
+            # clip per-example gradients
+            clipped = self._clip_gradients(per_example_grads)
+
+            # average
+            grad_mean = np.mean(clipped, axis=0)  # (d,)
+
+            # add Gaussian noise
+            # std ~ C * noise_multiplier / batch_size
+            sigma = self.noise_multiplier * self.C / float(self.batch_size)
+            noise = self.rng.normal(loc=0.0, scale=sigma, size=self.d)
+
+            noisy_grad = grad_mean + noise
+
+            # gradient descent update
+            self.w -= self.lr * noisy_grad
+
+    def predict(self, X):
+        """
+        Return h(x) = w^T x.
+        X: shape (n, d)
+        """
+        return X.dot(self.w)
