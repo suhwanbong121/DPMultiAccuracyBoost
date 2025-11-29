@@ -134,9 +134,7 @@ class DPLinearAuditor(object):
         assert d == self.d
 
         indices = np.arange(n)
-        # ====================================================================
         # IMPROVED BATCH PROCESSING - Added for better convergence
-        # ====================================================================
         # Process multiple batches per epoch for better convergence
         num_batches_per_epoch = max(1, n // self.batch_size)
         
@@ -166,9 +164,7 @@ class DPLinearAuditor(object):
 
                 # add Gaussian noise
                 # std ~ C * noise_multiplier / batch_size
-                # ============================================================
-                # PRIVACY: Noise scale calculation - Critical for DP guarantee
-                # ============================================================
+                # PRIVACY: Noise scale calculation for DP guarantee
                 sigma = self.noise_multiplier * self.C / float(len(batch_idx))
                 noise = self.rng.normal(loc=0.0, scale=sigma, size=self.d)
 
@@ -176,7 +172,7 @@ class DPLinearAuditor(object):
 
                 # gradient descent update
                 self.w -= self.lr * noisy_grad
-        # ====================================================================
+        
 
     def predict(self, X):
         """
@@ -185,9 +181,7 @@ class DPLinearAuditor(object):
         """
         return X.dot(self.w)
 
-# ============================================================================
 # PRIVACY ACCOUNTING FUNCTIONS - Added for DP Multiaccuracy
-# ============================================================================
 
 def compute_epsilon_dp_sgd(noise_multiplier, dataset_size, num_steps, batch_size, delta):
     """
