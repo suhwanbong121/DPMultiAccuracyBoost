@@ -38,7 +38,7 @@ class CNN(object):
         if type(paddings) != list:
             self.padding = [paddings] * self.num_conv_layers
         else:
-            self.padding = padding
+            self.padding = paddings
         self.learning_rate = learning_rate
         self.decay_steps = decay_steps
         self.decay_rate = decay_rate
