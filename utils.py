@@ -150,7 +150,6 @@ class DPLinearAuditor(object):
                 Xb = X[batch_idx]          # (B, d)
                 rb = r[batch_idx]          # (B,)
 
-                # forward
                 preds = Xb.dot(self.w)     # (B,)
                 # grad wrt w for each example: (pred - r) * x
                 # shape: (B, d)
@@ -163,7 +162,8 @@ class DPLinearAuditor(object):
                 grad_mean = np.mean(clipped, axis=0)  # (d,)
 
                 # add Gaussian noise
-                sigma = self.noise_multiplier * self.C / float(len(batch_idx))
+                
+                sigma = self.noise_multiplier * self.C
                 noise = self.rng.normal(loc=0.0, scale=sigma, size=self.d)
 
                 noisy_grad = grad_mean + noise
@@ -234,32 +234,37 @@ def compute_noisy_correlation(auditor, X, residuals, clipping_bound, epsilon, de
 
 # PRIVACY ACCOUNTING FUNCTIONS 
 
-def compute_epsilon_dp_sgd(noise_multiplier, dataset_size, num_steps, batch_size, delta):
+def compute_epsilon_dp_sgd(noise_multiplier, dataset_size, num_steps, batch_size, delta, clipping_norm=1.0):
     """
     Compute (epsilon, delta)-DP guarantee for DP-SGD using basic composition.
     
     
     Args:
-        noise_multiplier: Noise multiplier used in DP-SGD 
+        noise_multiplier: Noise multiplier 
         dataset_size: Total size of dataset (n)
         num_steps: Number of training steps (K)
-        batch_size: Batch size used in training
-        delta: Target delta value per step (delata_s)
+        batch_size: Batch size used in training 
+        delta: Target delta value per step (δs)
+        clipping_norm: Gradient clipping norm C (default 1.0)
         
     Returns:
         Estimated epsilon value for the entire DP-SGD procedure
     """
     import math
     
-    
-    
     if delta <= 0 or delta >= 1:
         raise ValueError("delta must be in (0, 1)")
+    if noise_multiplier <= 0:
+        raise ValueError("noise_multiplier must be > 0")
+    if dataset_size <= 0:
+        raise ValueError("dataset_size must be > 0")
     
-    # Epsilon per step 
-    epsilon_per_step = (2.0 / noise_multiplier) * math.sqrt(2.0 * math.log(1.25 / delta))
     
-  
+    
+    sensitivity = 2.0 * clipping_norm / float(dataset_size)
+    epsilon_per_step = (sensitivity * math.sqrt(2.0 * math.log(1.25 / delta))) / noise_multiplier
+    
+    # Total epsilon using basic composition 
     epsilon_total = epsilon_per_step * num_steps
     
     return epsilon_total
