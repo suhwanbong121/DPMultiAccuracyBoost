@@ -3,20 +3,26 @@ import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import cv2
+import math
 
-def split_data(data, ratio = [1, 0, 0], idxs=None):
-    
+
+def split_data(data, ratio=[1, 0, 0], idxs=None):
+    """
+    Split data into train/val/test according to ratio.
+    data: array or list/tuple of arrays with same first dimension.
+    """
     if idxs is None:
-        num = data[0].shape[0] if type(data)==list  or type(data)==tuple else data.shape[0]
+        num = data[0].shape[0] if isinstance(data, (list, tuple)) else data.shape[0]
         idx = np.arange(num)
         np.random.shuffle(idx)
-        idx_train = idx[:int(ratio[0]*num)]
-        idx_val = idx[int(ratio[0]*num):int((ratio[0]+ratio[1])*num)]
-        idx_test = idx[int((ratio[0]+ratio[1])*num):]
+        idx_train = idx[:int(ratio[0] * num)]
+        idx_val = idx[int(ratio[0] * num):int((ratio[0] + ratio[1]) * num)]
+        idx_test = idx[int((ratio[0] + ratio[1]) * num):]
     else:
-        idx_train,idx_val,idx_test = idxs
+        idx_train, idx_val, idx_test = idxs
+
     train, val, test = [], [], []
-    if type(data)==list or type(data)==tuple:
+    if isinstance(data, (list, tuple)):
         for counter in range(len(data)):
             train.append(data[counter][idx_train])
             val.append(data[counter][idx_val])
@@ -25,46 +31,61 @@ def split_data(data, ratio = [1, 0, 0], idxs=None):
         train = data[idx_train]
         val = data[idx_val]
         test = data[idx_test]
-    return (train,val,test),(idx_train,idx_val,idx_test)
+    return (train, val, test), (idx_train, idx_val, idx_test)
+
 
 def get_session(number=None):
+    """
+    Create a TF1 session with GPU memory growth.
+    """
     config_gpu = tf.ConfigProto()
     config_gpu.gpu_options.allow_growth = True
     if number is not None:
-        device = "/gpu{}".format(number)
+        device = "/gpu:{}".format(number)
+        # device 변수를 실제로 사용하려면 with tf.device(device): 를 밖에서 써야 함.
     return tf.Session(config=config_gpu)
 
+
 def read_images(files):
+    """
+    Read a list of image file paths and return numpy array of RGB images (160x160).
+    """
     ims = []
     for file in files:
         image_rgb = cv2.imread(file)
-        if image_rgb.shape[0]!=image_rgb.shape[1]:
-            image_rgb = image_rgb[29:-29, 9:-9,::-1]
+        if image_rgb is None:
+            continue
+        if image_rgb.shape[0] != image_rgb.shape[1]:
+            image_rgb = image_rgb[29:-29, 9:-9, ::-1]
         else:
             cut = 1
-            image_rgb = cv2.resize(image_rgb[cut:-cut,cut:-cut,:], (160,160))[:,:,::-1]
+            image_rgb = cv2.resize(image_rgb[cut:-cut, cut:-cut, :], (160, 160))[:, :, ::-1]
         ims.append(image_rgb)
     return np.array(ims)
 
-#From Facenet Library:
-class ImageClass():
-    "Stores the paths to images for a given class"
+
+# From Facenet Library:
+class ImageClass:
+    """Stores the paths to images for a given class."""
     def __init__(self, name, image_paths):
         self.name = name
         self.image_paths = image_paths
-  
+
     def __str__(self):
         return self.name + ', ' + str(len(self.image_paths)) + ' images'
-  
+
     def __len__(self):
         return len(self.image_paths)
-    
+
+
 def get_dataset(path, has_class_directories=True):
-    
+    """
+    Load dataset structure where subdirectories correspond to classes.
+    """
     dataset = []
     path_exp = os.path.expanduser(path)
-    classes = [path for path in os.listdir(path_exp) \
-                    if os.path.isdir(os.path.join(path_exp, path))]
+    classes = [p for p in os.listdir(path_exp)
+               if os.path.isdir(os.path.join(path_exp, p))]
     classes.sort()
     nrof_classes = len(classes)
     for i in range(nrof_classes):
@@ -75,15 +96,22 @@ def get_dataset(path, has_class_directories=True):
 
     return dataset
 
+
 def get_image_paths(facedir):
-    #From Facenet Library
+    """
+    From Facenet library: list all image paths in a directory.
+    """
     image_paths = []
     if os.path.isdir(facedir):
         images = os.listdir(facedir)
-        image_paths = [os.path.join(facedir,img) for img in images]
+        image_paths = [os.path.join(facedir, img) for img in images]
     return image_paths
 
+
 def get_image_paths_and_labels(dataset):
+    """
+    Flatten dataset into (image_paths, labels) lists.
+    """
     image_paths_flat = []
     labels_flat = []
     for i in range(len(dataset)):
@@ -91,86 +119,105 @@ def get_image_paths_and_labels(dataset):
         labels_flat += [i] * len(dataset[i].image_paths)
     return image_paths_flat, labels_flat
 
+
+# ============================================================
+# DP-SGD AUDITOR (FULL-BATCH, THEORETICALLY DP)
+# ============================================================
+
 class DPLinearAuditor(object):
     """
-    Simple DP-SGD linear regression auditor for multiaccuracy.
+    Simple full-batch DP-SGD linear regression auditor for multiaccuracy.
+
     h(x) = w^T x
+
+    This implementation matches the theoretical analysis:
+
+    - Per-example gradients are clipped to L2 norm <= C.
+    - We average over all n examples (full batch).
+    - At each step s we add Gaussian noise with std sigma_s chosen from
+      the Gaussian mechanism so that the step is (epsilon_s, delta_s)-DP.
+    - Over K steps, by basic composition, total privacy is
+      (sum epsilon_s, sum delta_s).
+
+    In practice, we will call fit(X, r, epsilon_audit_round, delta_audit_round)
+    and split epsilon_audit_round, delta_audit_round equally across K steps.
     """
 
     def __init__(self,
                  feature_dim,
                  learning_rate=0.1,
                  num_steps=200,
-                 batch_size=128,
                  clipping_norm=1.0,
-                 noise_multiplier=1.0,
                  seed=42):
         self.d = feature_dim
         self.lr = learning_rate
         self.num_steps = num_steps
-        self.batch_size = batch_size
         self.C = clipping_norm          # gradient clipping norm
-        self.noise_multiplier = noise_multiplier
         self.rng = np.random.RandomState(seed)
         # initialize weights
         self.w = np.zeros(self.d, dtype=np.float32)
 
     def _clip_gradients(self, grads):
         """
-        grads: array of shape (batch_size, d)
+        grads: array of shape (n, d)
         Clip each per-example gradient to L2 norm <= C.
         """
         norms = np.linalg.norm(grads, axis=1, keepdims=True) + 1e-12
         scale = np.minimum(1.0, self.C / norms)
         return grads * scale
 
-    def fit(self, X, r):
+    def fit(self, X, r, epsilon_audit_round, delta_audit_round):
         """
+        Train auditor with full-batch DP-SGD.
+
         X: shape (n, d)  – features (e.g., embeddings)
         r: shape (n,)    – residuals f_t(x) - y
-        We minimize 0.5 * (h(x) - r)^2 with DP-SGD.
+        epsilon_audit_round: total privacy epsilon budget for this round (audit part)
+        delta_audit_round: total privacy delta budget for this round (audit part)
+
+        We split the round budget equally across num_steps:
+            epsilon_s = epsilon_audit_round / num_steps
+            delta_s   = delta_audit_round   / num_steps
+
+        At each step we apply a Gaussian mechanism to the average clipped gradient
+        with sensitivity 2C/n.
         """
         n, d = X.shape
         assert d == self.d
 
-        indices = np.arange(n)
-    
-        # Process multiple batches per epoch for better convergence
-        num_batches_per_epoch = max(1, n // self.batch_size)
-        
+        if n == 0:
+            return
+
+        if epsilon_audit_round <= 0 or delta_audit_round <= 0 or delta_audit_round >= 1:
+            raise ValueError("epsilon_audit_round must be > 0 and delta_audit_round in (0,1)")
+
+        eps_step = float(epsilon_audit_round) / float(self.num_steps)
+        delta_step = float(delta_audit_round) / float(self.num_steps)
+
+        # Sensitivity of average clipped gradient: 2C/n (Lemma)
+        sensitivity = 2.0 * self.C / float(n)
+
         for step in range(self.num_steps):
-            self.rng.shuffle(indices)
-            
-            # Process all batches in this epoch
-            for batch_idx_start in range(0, min(n, num_batches_per_epoch * self.batch_size), self.batch_size):
-                batch_idx = indices[batch_idx_start:batch_idx_start + self.batch_size]
-                if len(batch_idx) == 0:
-                    continue
-                    
-                Xb = X[batch_idx]          # (B, d)
-                rb = r[batch_idx]          # (B,)
+            # Full-batch gradients
+            preds = X.dot(self.w)          # (n,)
+            per_example_grads = ((preds - r)[:, None] * X)  # (n, d)
 
-                preds = Xb.dot(self.w)     # (B,)
-                # grad wrt w for each example: (pred - r) * x
-                # shape: (B, d)
-                per_example_grads = ((preds - rb)[:, None] * Xb)
+            # clip per-example gradients
+            clipped = self._clip_gradients(per_example_grads)
 
-                # clip per-example gradients
-                clipped = self._clip_gradients(per_example_grads)
+            # average
+            grad_mean = np.mean(clipped, axis=0)  # (d,)
 
-                # average
-                grad_mean = np.mean(clipped, axis=0)  # (d,)
+            # Gaussian noise scale for this step:
+            # sigma_step >= sensitivity * sqrt(2 log(1.25/delta_step)) / eps_step
+            sigma_step = (sensitivity * math.sqrt(2.0 * math.log(1.25 / delta_step))) / eps_step
 
-                # add Gaussian noise
-                
-                sigma = self.noise_multiplier * self.C
-                noise = self.rng.normal(loc=0.0, scale=sigma, size=self.d)
+            # add Gaussian noise
+            noise = self.rng.normal(loc=0.0, scale=sigma_step, size=self.d)
+            noisy_grad = grad_mean + noise
 
-                noisy_grad = grad_mean + noise
-
-                # gradient descent update
-                self.w -= self.lr * noisy_grad
-        
+            # gradient descent update
+            self.w -= self.lr * noisy_grad
 
     def predict(self, X):
         """
@@ -180,215 +227,177 @@ class DPLinearAuditor(object):
         return X.dot(self.w)
 
 
-def compute_noisy_correlation(auditor, X, residuals, clipping_bound, epsilon, delta, seed=42):
+# ============================================================
+# DIFFERENTIALLY PRIVATE CORRELATION QUERY
+# ============================================================
+
+def compute_noisy_correlation(auditor,
+                              X,
+                              residuals,
+                              clipping_bound,
+                              epsilon_corr,
+                              delta_corr,
+                              seed=42):
     """
-    Implement noisy correlation query as per Lemma 4.
-    
-    Computes differentially private correlation estimate
-    
+    Implement noisy correlation query:
+
+        Delta_t = E[ h_t(x) * (f_t(x) - y) ]
+
+    with Gaussian noise calibrated for (epsilon_corr, delta_corr)-DP.
+
     Args:
-        auditor: Trained DPLinearAuditor instance
+        auditor: Trained DPLinearAuditor instance (fixed model)
         X: Features (n, d)
         residuals: Residuals f_t(x) - y (n,)
-        clipping_bound: Clipping bound B
-        epsilon: Privacy budget for correlation query 
-        delta: Privacy budget for correlation query 
+        clipping_bound: Clipping bound B for the scores
+        epsilon_corr: Privacy budget epsilon for correlation query
+        delta_corr: Privacy budget delta for correlation query
         seed: Random seed for noise generation
-        
+
     Returns:
-        Noisy correlation estimate 
+        Noisy correlation estimate hat{Delta}_t.
     """
-    import math
-    
     n = len(X)
     if n == 0:
         return 0.0
-    
+
+    if epsilon_corr <= 0 or delta_corr <= 0 or delta_corr >= 1:
+        raise ValueError("epsilon_corr must be > 0 and delta_corr must be in (0, 1)")
+
     # Compute h_t(x_i) for all examples
     h_predictions = auditor.predict(X)  # (n,)
-    
-    # Compute per-example scores
+
+    # Per-example scores c_i = h_t(x_i) * (f_t(x_i) - y_i)
     scores = h_predictions * residuals  # (n,)
-    
-    # Clip scores to [-B, B] 
+
+    # Clip scores to [-B, B]
     clipped_scores = np.clip(scores, -clipping_bound, clipping_bound)
-    
-    # Compute average
+
+    # Average
     avg_correlation = np.mean(clipped_scores)
-    
-    # Compute noise scale 
-    if epsilon <= 0 or delta <= 0 or delta >= 1:
-        raise ValueError("epsilon must be > 0, delta must be in (0, 1)")
-    
-    sensitivity = 2.0 * clipping_bound / float(n)  # From Lemma 3
-    sigma_corr = (sensitivity * math.sqrt(2.0 * math.log(1.25 / delta))) / epsilon
-    
+
+    # Sensitivity of average clipped score: 2B / n
+    sensitivity = 2.0 * clipping_bound / float(n)
+
+    # Noise scale for Gaussian mechanism
+    sigma_corr = (sensitivity * math.sqrt(2.0 * math.log(1.25 / delta_corr))) / epsilon_corr
+
     # Add Gaussian noise
     rng = np.random.RandomState(seed)
     noise = rng.normal(loc=0.0, scale=sigma_corr)
-    
-    # Return noisy correlation estimate
+
     noisy_correlation = avg_correlation + noise
-    
     return noisy_correlation
 
-# PRIVACY ACCOUNTING FUNCTIONS 
 
-def compute_epsilon_dp_sgd(noise_multiplier, dataset_size, num_steps, batch_size, delta, clipping_norm=1.0):
-    """
-    Compute (epsilon, delta)-DP guarantee for DP-SGD using basic composition.
-    
-    
-    Args:
-        noise_multiplier: Noise multiplier 
-        dataset_size: Total size of dataset (n)
-        num_steps: Number of training steps (K)
-        batch_size: Batch size used in training 
-        delta: Target delta value per step (δs)
-        clipping_norm: Gradient clipping norm C (default 1.0)
-        
-    Returns:
-        Estimated epsilon value for the entire DP-SGD procedure
-    """
-    import math
-    
-    if delta <= 0 or delta >= 1:
-        raise ValueError("delta must be in (0, 1)")
-    if noise_multiplier <= 0:
-        raise ValueError("noise_multiplier must be > 0")
-    if dataset_size <= 0:
-        raise ValueError("dataset_size must be > 0")
-    
-    
-    
-    sensitivity = 2.0 * clipping_norm / float(dataset_size)
-    epsilon_per_step = (sensitivity * math.sqrt(2.0 * math.log(1.25 / delta))) / noise_multiplier
-    
-    # Total epsilon using basic composition 
-    epsilon_total = epsilon_per_step * num_steps
-    
-    return epsilon_total
-
-
-def compute_epsilon_basic_composition(epsilon_per_round, num_rounds):
-    """
-    Compute total epsilon using basic composition.
-    
-    
-    Args:
-        epsilon_per_round: Epsilon consumed per round
-        num_rounds: Number of rounds
-        
-    Returns:
-        Total epsilon
-    """
-    return epsilon_per_round * num_rounds
-
-
-def compute_delta_basic_composition(delta_per_round, num_rounds):
-    """
-    Compute total delta using basic composition.
-    
-    
-    Args:
-        delta_per_round: Delta consumed per round
-        num_rounds: Number of rounds
-        
-    Returns:
-        Total delta
-    """
-    return delta_per_round * num_rounds
-
+# ============================================================
+# SIMPLE PRIVACY ACCOUNTANT
+# ============================================================
 
 class PrivacyAccountant:
     """
-    tracks privacy budget consumption across multiple DP operations.
-    
+    Simple privacy accountant to track (epsilon, delta) budget across rounds.
+
+    We assume that each round t uses:
+        epsilon_t/2, delta_t/2 for auditor training (DP-SGD)
+        epsilon_t/2, delta_t/2 for correlation query
+
+    and we require:
+        sum_t epsilon_t <= total_epsilon
+        sum_t delta_t   <= total_delta.
     """
-    
+
     def __init__(self, total_epsilon, total_delta):
         """
         Initialize privacy accountant.
-        
+
         Args:
-            total_epsilon: Total privacy budget 
-            total_delta: Total privacy budget 
+            total_epsilon: Total privacy budget epsilon
+            total_delta: Total privacy budget delta
         """
-        self.total_epsilon = total_epsilon
-        self.total_delta = total_delta
+        self.total_epsilon = float(total_epsilon)
+        self.total_delta = float(total_delta)
         self.consumed_epsilon = 0.0
         self.consumed_delta = 0.0
-        self.rounds = []  # Each entry: (epsilon_audit, epsilon_corr, delta_audit, delta_corr)
-    
+        # Each entry: (epsilon_audit_t, epsilon_corr_t, delta_audit_t, delta_corr_t)
+        self.rounds = []
+
     def allocate_round(self, epsilon_audit_t, epsilon_corr_t, delta_audit_t, delta_corr_t):
         """
         Allocate privacy budget for one round, splitting between auditor and correlation.
-        
-        
+
         Args:
-            epsilon_audit_t: Privacy budget for auditor training 
-            epsilon_corr_t: Privacy budget for correlation query 
-            delta_audit_t: Privacy budget for auditor training 
-            delta_corr_t: Privacy budget for correlation query 
-            
+            epsilon_audit_t: Privacy budget for auditor training in this round
+            epsilon_corr_t: Privacy budget for correlation query in this round
+            delta_audit_t: Privacy budget for auditor training in this round
+            delta_corr_t: Privacy budget for correlation query in this round
+
         Returns:
-            True if allocation is successful, False if budget exceeded
+            True if allocation is successful, False if budget would be exceeded.
         """
-        epsilon_t = epsilon_audit_t + epsilon_corr_t
-        delta_t = delta_audit_t + delta_corr_t
-        
+        epsilon_t = float(epsilon_audit_t) + float(epsilon_corr_t)
+        delta_t = float(delta_audit_t) + float(delta_corr_t)
+
         if self.consumed_epsilon + epsilon_t > self.total_epsilon:
             return False
         if self.consumed_delta + delta_t > self.total_delta:
             return False
-        
+
         self.consumed_epsilon += epsilon_t
         self.consumed_delta += delta_t
         self.rounds.append((epsilon_audit_t, epsilon_corr_t, delta_audit_t, delta_corr_t))
         return True
-    
+
     def allocate_round_split(self, epsilon_t, delta_t):
         """
-        Convenience method: Allocate round budget with equal split 
-        
+        Convenience method: allocate a round budget with equal split:
+
+            epsilon_audit_t = epsilon_t / 2
+            epsilon_corr_t  = epsilon_t / 2
+            delta_audit_t   = delta_t / 2
+            delta_corr_t    = delta_t / 2
+
         Args:
-            epsilon_t: Total privacy budget for this round 
-            delta_t: Total privacy budget for this round 
-            
+            epsilon_t: Total epsilon for this round
+            delta_t: Total delta for this round
+
         Returns:
-            True if allocation is successful, False if budget exceeded
+            True if allocation is successful, False otherwise.
         """
-        # Split equally
+        epsilon_t = float(epsilon_t)
+        delta_t = float(delta_t)
         epsilon_audit_t = epsilon_t / 2.0
         epsilon_corr_t = epsilon_t / 2.0
         delta_audit_t = delta_t / 2.0
         delta_corr_t = delta_t / 2.0
-        
         return self.allocate_round(epsilon_audit_t, epsilon_corr_t, delta_audit_t, delta_corr_t)
-    
+
     def get_remaining_budget(self):
-        """Get remaining privacy budget as (epsilon, delta) tuple."""
+        """Get remaining privacy budget as (epsilon, delta)."""
         return (self.total_epsilon - self.consumed_epsilon,
                 self.total_delta - self.consumed_delta)
-    
+
     def get_consumed_budget(self):
-        """Get consumed privacy budget as (epsilon, delta) tuple."""
+        """Get consumed privacy budget as (epsilon, delta)."""
         return (self.consumed_epsilon, self.consumed_delta)
-    
+
     def can_allocate(self, epsilon_t, delta_t):
         """
         Check if budget can be allocated without actually allocating.
-        
+
         Args:
-            epsilon_t: Total epsilon for the round 
-            delta_t: Total delta for the round 
+            epsilon_t: Total epsilon for the round
+            delta_t: Total delta for the round
         """
+        epsilon_t = float(epsilon_t)
+        delta_t = float(delta_t)
         return (self.consumed_epsilon + epsilon_t <= self.total_epsilon and
                 self.consumed_delta + delta_t <= self.total_delta)
-    
-    def can_allocate_split(self, epsilon_audit_t, epsilon_corr_t, delta_audit_t, delta_corr_t):
-        """Check if budget can be allocated with explicit split."""
-        epsilon_t = epsilon_audit_t + epsilon_corr_t
-        delta_t = delta_audit_t + delta_corr_t
-        return self.can_allocate(epsilon_t, delta_t)
 
+    def can_allocate_split(self, epsilon_audit_t, epsilon_corr_t, delta_audit_t, delta_corr_t):
+        """
+        Check if budget can be allocated for a round with an explicit split.
+        """
+        epsilon_t = float(epsilon_audit_t) + float(epsilon_corr_t)
+        delta_t = float(delta_audit_t) + float(delta_corr_t)
+        return self.can_allocate(epsilon_t, delta_t)
