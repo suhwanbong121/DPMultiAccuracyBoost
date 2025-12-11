@@ -398,16 +398,42 @@ def compute_noisy_correlation(h_vals, residuals, clipping_bound, epsilon, delta,
     return avg_corr + noise
 
 
-def sigmoid_multiaccuracy_update(probs, h_vals, eta):
+def sigmoid_multiaccuracy_update(probs, h_vals, eta,
+                                 logit_clip=8.0,
+                                 h_clip=5.0):
     """
-    Same as your multiaccuracy_update: update logits by -eta * h(x)
-    and map back with sigmoid. Defined here to keep dp_multiaccuracy_utils
-    self-contained; you can delete your local copy if you prefer.
+    Numerically stable multiaccuracy multiplicative-weights-style update.
+
+    We view probs as sigmoid(logits) and move logits in direction -eta * h(x),
+    but we clip both h(x) and the updated logits to avoid overflow in exp.
+
+    Args:
+        probs: Current probabilities in [0,1], shape (n,)
+        h_vals: Auditor outputs h_t(x), shape (n,)
+        eta: Learning rate for the update
+        logit_clip: Max absolute value for logits to avoid exp overflow
+        h_clip: Max absolute value for auditor outputs
+
+    Returns:
+        Updated probabilities in [0,1], shape (n,)
     """
+    # 1) Clip probabilities away from exactly 0 or 1
     eps = 1e-6
-    p = np.clip(probs, eps, 1 - eps)
+    p = np.clip(probs, eps, 1.0 - eps)
+
+    # 2) Map to logits
     logits = np.log(p / (1.0 - p))
-    new_logits = logits - eta * h_vals
+
+    # 3) Clip auditor outputs to avoid huge steps
+    h = np.clip(h_vals, -h_clip, h_clip)
+
+    # 4) Update logits
+    new_logits = logits - eta * h
+
+    # 5) Clip updated logits to avoid overflow in exp
+    new_logits = np.clip(new_logits, -logit_clip, logit_clip)
+
+    # 6) Map back through sigmoid
     new_probs = 1.0 / (1.0 + np.exp(-new_logits))
     return new_probs
 
