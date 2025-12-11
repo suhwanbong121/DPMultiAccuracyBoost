@@ -46,7 +46,7 @@ def read_images(files):
         ims.append(image_rgb)
     return np.array(ims)
 
-## From Facenet Library:
+#From Facenet Library:
 class ImageClass():
     "Stores the paths to images for a given class"
     def __init__(self, name, image_paths):
@@ -76,7 +76,7 @@ def get_dataset(path, has_class_directories=True):
     return dataset
 
 def get_image_paths(facedir):
-    ## From Facenet Library
+    #From Facenet Library
     image_paths = []
     if os.path.isdir(facedir):
         images = os.listdir(facedir)
@@ -134,7 +134,7 @@ class DPLinearAuditor(object):
         assert d == self.d
 
         indices = np.arange(n)
-        # IMPROVED BATCH PROCESSING - Added for better convergence
+    
         # Process multiple batches per epoch for better convergence
         num_batches_per_epoch = max(1, n // self.batch_size)
         
@@ -163,8 +163,6 @@ class DPLinearAuditor(object):
                 grad_mean = np.mean(clipped, axis=0)  # (d,)
 
                 # add Gaussian noise
-                # std ~ C * noise_multiplier / batch_size
-                # PRIVACY: Noise scale calculation for DP guarantee
                 sigma = self.noise_multiplier * self.C / float(len(batch_idx))
                 noise = self.rng.normal(loc=0.0, scale=sigma, size=self.d)
 
@@ -181,41 +179,88 @@ class DPLinearAuditor(object):
         """
         return X.dot(self.w)
 
-# PRIVACY ACCOUNTING FUNCTIONS - Added for DP Multiaccuracy
+
+def compute_noisy_correlation(auditor, X, residuals, clipping_bound, epsilon, delta, seed=42):
+    """
+    Implement noisy correlation query as per Lemma 4.
+    
+    Computes differentially private correlation estimate
+    
+    Args:
+        auditor: Trained DPLinearAuditor instance
+        X: Features (n, d)
+        residuals: Residuals f_t(x) - y (n,)
+        clipping_bound: Clipping bound B
+        epsilon: Privacy budget for correlation query 
+        delta: Privacy budget for correlation query 
+        seed: Random seed for noise generation
+        
+    Returns:
+        Noisy correlation estimate 
+    """
+    import math
+    
+    n = len(X)
+    if n == 0:
+        return 0.0
+    
+    # Compute h_t(x_i) for all examples
+    h_predictions = auditor.predict(X)  # (n,)
+    
+    # Compute per-example scores
+    scores = h_predictions * residuals  # (n,)
+    
+    # Clip scores to [-B, B] 
+    clipped_scores = np.clip(scores, -clipping_bound, clipping_bound)
+    
+    # Compute average
+    avg_correlation = np.mean(clipped_scores)
+    
+    # Compute noise scale 
+    if epsilon <= 0 or delta <= 0 or delta >= 1:
+        raise ValueError("epsilon must be > 0, delta must be in (0, 1)")
+    
+    sensitivity = 2.0 * clipping_bound / float(n)  # From Lemma 3
+    sigma_corr = (sensitivity * math.sqrt(2.0 * math.log(1.25 / delta))) / epsilon
+    
+    # Add Gaussian noise
+    rng = np.random.RandomState(seed)
+    noise = rng.normal(loc=0.0, scale=sigma_corr)
+    
+    # Return noisy correlation estimate
+    noisy_correlation = avg_correlation + noise
+    
+    return noisy_correlation
+
+# PRIVACY ACCOUNTING FUNCTIONS 
 
 def compute_epsilon_dp_sgd(noise_multiplier, dataset_size, num_steps, batch_size, delta):
     """
-    Compute (ε, δ)-DP guarantee for DP-SGD using basic composition.
+    Compute (epsilon, delta)-DP guarantee for DP-SGD using basic composition.
     
-    This is a simplified estimate. For production use, consider using
-    more sophisticated composition (e.g., RDP composition via opacus library).
     
     Args:
-        noise_multiplier: Noise multiplier used in DP-SGD
-        dataset_size: Total size of dataset
-        num_steps: Number of training steps
+        noise_multiplier: Noise multiplier used in DP-SGD 
+        dataset_size: Total size of dataset (n)
+        num_steps: Number of training steps (K)
         batch_size: Batch size used in training
-        delta: Target δ value
+        delta: Target delta value per step (delata_s)
         
     Returns:
-        Estimated epsilon value
+        Estimated epsilon value for the entire DP-SGD procedure
     """
-    # Sampling rate: probability that a given example is in a batch
-    sampling_rate = batch_size / float(dataset_size)
+    import math
     
-    # For DP-SGD with Gaussian mechanism:
-    # Each step provides (ε_step, δ_step)-DP where:
-    # ε_step ≈ noise_multiplier / batch_size (simplified)
-    # Using basic composition: ε_total = num_steps * ε_step
     
-    # More accurate: using the formula from Abadi et al. (2016)
-    # For Gaussian mechanism with noise multiplier c:
-    # ε ≈ c * sqrt(2 * log(1.25/δ)) / batch_size per step
-    # With composition over num_steps steps
     
-    # Simplified estimate (conservative)
-    epsilon_per_step = noise_multiplier / batch_size
-    epsilon_total = epsilon_per_step * num_steps * sampling_rate
+    if delta <= 0 or delta >= 1:
+        raise ValueError("delta must be in (0, 1)")
+    
+    # Epsilon per step 
+    epsilon_per_step = (2.0 / noise_multiplier) * math.sqrt(2.0 * math.log(1.25 / delta))
+    
+  
+    epsilon_total = epsilon_per_step * num_steps
     
     return epsilon_total
 
@@ -224,7 +269,6 @@ def compute_epsilon_basic_composition(epsilon_per_round, num_rounds):
     """
     Compute total epsilon using basic composition.
     
-    Basic composition: ε_total = sum(ε_i) for i in rounds
     
     Args:
         epsilon_per_round: Epsilon consumed per round
@@ -240,7 +284,6 @@ def compute_delta_basic_composition(delta_per_round, num_rounds):
     """
     Compute total delta using basic composition.
     
-    Basic composition: δ_total = sum(δ_i) for i in rounds
     
     Args:
         delta_per_round: Delta consumed per round
@@ -254,8 +297,8 @@ def compute_delta_basic_composition(delta_per_round, num_rounds):
 
 class PrivacyAccountant:
     """
-    Tracks privacy budget consumption across multiple DP operations.
-    Uses basic composition for (ε, δ)-DP.
+    tracks privacy budget consumption across multiple DP operations.
+    
     """
     
     def __init__(self, total_epsilon, total_delta):
@@ -263,26 +306,32 @@ class PrivacyAccountant:
         Initialize privacy accountant.
         
         Args:
-            total_epsilon: Total privacy budget (ε)
-            total_delta: Total privacy budget (δ)
+            total_epsilon: Total privacy budget 
+            total_delta: Total privacy budget 
         """
         self.total_epsilon = total_epsilon
         self.total_delta = total_delta
         self.consumed_epsilon = 0.0
         self.consumed_delta = 0.0
-        self.rounds = []
+        self.rounds = []  # Each entry: (epsilon_audit, epsilon_corr, delta_audit, delta_corr)
     
-    def allocate_round(self, epsilon_t, delta_t):
+    def allocate_round(self, epsilon_audit_t, epsilon_corr_t, delta_audit_t, delta_corr_t):
         """
-        Allocate privacy budget for one round.
+        Allocate privacy budget for one round, splitting between auditor and correlation.
+        
         
         Args:
-            epsilon_t: Privacy budget for this round
-            delta_t: Privacy budget for this round
+            epsilon_audit_t: Privacy budget for auditor training 
+            epsilon_corr_t: Privacy budget for correlation query 
+            delta_audit_t: Privacy budget for auditor training 
+            delta_corr_t: Privacy budget for correlation query 
             
         Returns:
             True if allocation is successful, False if budget exceeded
         """
+        epsilon_t = epsilon_audit_t + epsilon_corr_t
+        delta_t = delta_audit_t + delta_corr_t
+        
         if self.consumed_epsilon + epsilon_t > self.total_epsilon:
             return False
         if self.consumed_delta + delta_t > self.total_delta:
@@ -290,8 +339,27 @@ class PrivacyAccountant:
         
         self.consumed_epsilon += epsilon_t
         self.consumed_delta += delta_t
-        self.rounds.append((epsilon_t, delta_t))
+        self.rounds.append((epsilon_audit_t, epsilon_corr_t, delta_audit_t, delta_corr_t))
         return True
+    
+    def allocate_round_split(self, epsilon_t, delta_t):
+        """
+        Convenience method: Allocate round budget with equal split 
+        
+        Args:
+            epsilon_t: Total privacy budget for this round 
+            delta_t: Total privacy budget for this round 
+            
+        Returns:
+            True if allocation is successful, False if budget exceeded
+        """
+        # Split equally
+        epsilon_audit_t = epsilon_t / 2.0
+        epsilon_corr_t = epsilon_t / 2.0
+        delta_audit_t = delta_t / 2.0
+        delta_corr_t = delta_t / 2.0
+        
+        return self.allocate_round(epsilon_audit_t, epsilon_corr_t, delta_audit_t, delta_corr_t)
     
     def get_remaining_budget(self):
         """Get remaining privacy budget as (epsilon, delta) tuple."""
@@ -303,7 +371,19 @@ class PrivacyAccountant:
         return (self.consumed_epsilon, self.consumed_delta)
     
     def can_allocate(self, epsilon_t, delta_t):
-        """Check if budget can be allocated without actually allocating."""
+        """
+        Check if budget can be allocated without actually allocating.
+        
+        Args:
+            epsilon_t: Total epsilon for the round 
+            delta_t: Total delta for the round 
+        """
         return (self.consumed_epsilon + epsilon_t <= self.total_epsilon and
                 self.consumed_delta + delta_t <= self.total_delta)
+    
+    def can_allocate_split(self, epsilon_audit_t, epsilon_corr_t, delta_audit_t, delta_corr_t):
+        """Check if budget can be allocated with explicit split."""
+        epsilon_t = epsilon_audit_t + epsilon_corr_t
+        delta_t = delta_audit_t + delta_corr_t
+        return self.can_allocate(epsilon_t, delta_t)
 
